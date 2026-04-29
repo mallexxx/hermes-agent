@@ -776,6 +776,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_qqbot(pconfig, chat_id, chunk)
         elif platform == Platform.YUANBAO:
             result = await _send_yuanbao(chat_id, chunk)
+        elif platform == Platform.ZULIP:
+            result = await _send_zulip(pconfig.token, pconfig.extra, chat_id, chunk, metadata={"thread_id": thread_id} if thread_id else None)
         else:
             # Plugin platform: route through the gateway's live adapter if
             # available, otherwise the plugin's standalone_sender_fn.
@@ -1352,6 +1354,76 @@ async def _send_sms(auth_token, chat_id, message):
                 return {"success": True, "platform": "sms", "chat_id": chat_id, "message_id": msg_sid}
     except Exception as e:
         return _error(f"SMS send failed: {e}")
+
+
+async def _send_mattermost(token, extra, chat_id, message):
+    """Send via Mattermost REST API."""
+    try:
+        import aiohttp
+    except ImportError:
+        return {"error": "aiohttp not installed. Run: pip install aiohttp"}
+    try:
+        base_url = (extra.get("url") or os.getenv("MATTERMOST_URL", "")).rstrip("/")
+        token = token or os.getenv("MATTERMOST_TOKEN", "")
+        if not base_url or not token:
+            return {"error": "Mattermost not configured (MATTERMOST_URL, MATTERMOST_TOKEN required)"}
+        url = f"{base_url}/api/v4/posts"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            async with session.post(url, headers=headers, json={"channel_id": chat_id, "message": message}) as resp:
+                if resp.status not in (200, 201):
+                    body = await resp.text()
+                    return _error(f"Mattermost API error ({resp.status}): {body}")
+                data = await resp.json()
+        return {"success": True, "platform": "mattermost", "chat_id": chat_id, "message_id": data.get("id")}
+    except Exception as e:
+        return _error(f"Mattermost send failed: {e}")
+
+
+async def _send_zulip(api_key, extra, chat_id, message, metadata=None):
+    """Send via Zulip REST API.
+
+    chat_id format: "stream_name::topic" or "stream_name" (uses ZULIP_DEFAULT_TOPIC).
+    """
+    try:
+        import aiohttp
+    except ImportError:
+        return {"error": "aiohttp not installed. Run: pip install aiohttp"}
+    try:
+        base_url = (extra.get("url") or os.getenv("ZULIP_URL", "")).rstrip("/")
+        bot_email = extra.get("bot_email") or os.getenv("ZULIP_BOT_EMAIL", "")
+        api_key = api_key or os.getenv("ZULIP_API_KEY", "")
+        if not base_url or not bot_email or not api_key:
+            return {"error": "Zulip not configured (ZULIP_URL, ZULIP_BOT_EMAIL, ZULIP_API_KEY required)"}
+
+        # Parse chat_id into stream + topic.
+        if "::" in chat_id:
+            stream_name, _, topic = chat_id.partition("::")
+            topic = topic.strip() or os.getenv("ZULIP_DEFAULT_TOPIC", "general")
+        else:
+            stream_name = chat_id.strip()
+            topic = (metadata or {}).get("thread_id") or os.getenv("ZULIP_DEFAULT_TOPIC", "general")
+
+        stream_name = stream_name.strip()
+        url = f"{base_url}/api/v1/messages"
+        payload = {
+            "type": "stream",
+            "to": stream_name,
+            "topic": topic,
+            "content": message,
+        }
+        auth = aiohttp.BasicAuth(bot_email, api_key)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            async with session.post(url, data=payload, auth=auth) as resp:
+                if resp.status not in (200, 201):
+                    body = await resp.text()
+                    return _error(f"Zulip API error ({resp.status}): {body}")
+                data = await resp.json()
+                if data.get("result") != "success":
+                    return _error(f"Zulip error: {data.get('msg', 'unknown')}")
+                return {"success": True, "platform": "zulip", "chat_id": chat_id, "message_id": str(data.get("id", ""))}
+    except Exception as e:
+        return _error(f"Zulip send failed: {e}")
 
 
 async def _send_matrix(token, extra, chat_id, message):

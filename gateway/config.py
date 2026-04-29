@@ -127,6 +127,8 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    ZULIP = "zulip"
+
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -1168,6 +1170,7 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
         Platform.MATTERMOST: "MATTERMOST_TOKEN",
         Platform.MATRIX: "MATRIX_ACCESS_TOKEN",
         Platform.WEIXIN: "WEIXIN_TOKEN",
+        Platform.ZULIP: "ZULIP_API_KEY",
     }
     for platform, pconfig in config.platforms.items():
         if not pconfig.enabled:
@@ -1355,6 +1358,28 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             chat_id=mattermost_home,
             name=os.getenv("MATTERMOST_HOME_CHANNEL_NAME", "Home"),
             thread_id=os.getenv("MATTERMOST_HOME_CHANNEL_THREAD_ID") or None,
+        )
+
+    # Zulip
+    zulip_api_key = os.getenv("ZULIP_API_KEY")
+    zulip_bot_email = os.getenv("ZULIP_BOT_EMAIL", "")
+    zulip_url = os.getenv("ZULIP_URL", "")
+    if zulip_api_key:
+        if not zulip_url:
+            logger.warning("ZULIP_API_KEY set but ZULIP_URL is missing")
+        if Platform.ZULIP not in config.platforms:
+            config.platforms[Platform.ZULIP] = PlatformConfig()
+        config.platforms[Platform.ZULIP].enabled = True
+        config.platforms[Platform.ZULIP].token = zulip_api_key
+        config.platforms[Platform.ZULIP].extra["url"] = zulip_url
+        if zulip_bot_email:
+            config.platforms[Platform.ZULIP].extra["bot_email"] = zulip_bot_email
+    zulip_home = os.getenv("ZULIP_HOME_CHANNEL")
+    if zulip_home and Platform.ZULIP in config.platforms:
+        config.platforms[Platform.ZULIP].home_channel = HomeChannel(
+            platform=Platform.ZULIP,
+            chat_id=zulip_home,
+            name=os.getenv("ZULIP_HOME_CHANNEL_NAME", "Home"),
         )
 
     # Matrix

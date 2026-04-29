@@ -534,6 +534,14 @@ PLATFORM_HINTS = {
         "attachments, audio and video as file attachments. "
         "Image URLs in markdown format ![alt](url) are rendered as inline previews automatically."
     ),
+    "zulip": (
+        "You are in a Zulip organization communicating with your user. "
+        "Zulip uses streams (like channels) and topics (like threads) to organize messages. "
+        "Zulip renders standard Markdown — headings, bold, italic, code blocks, and tables all work. "
+        "LaTeX math is supported: inline with $$...$$ and block with ```math ... ```. "
+        "You can send media files natively: include MEDIA:/absolute/path/to/file in your response. "
+        "Image URLs in markdown format ![alt](url) are displayed inline."
+    ),
     "matrix": (
         "You are in a Matrix room communicating with your user. "
         "Matrix renders Markdown — bold, italic, code blocks, and links work; "

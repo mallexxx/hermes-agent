@@ -6508,11 +6508,14 @@ class GatewayRunner:
             return QQAdapter(config)
 
         elif platform == Platform.YUANBAO:
-            from gateway.platforms.yuanbao import YuanbaoAdapter, WEBSOCKETS_AVAILABLE
-            if not WEBSOCKETS_AVAILABLE:
-                logger.warning("Yuanbao: websockets not installed. Run: pip install websockets")
-                return None
+            from gateway.platforms.yuanbao import YuanbaoAdapter
             return YuanbaoAdapter(config)
+        elif platform == Platform.ZULIP:
+            from gateway.platforms.zulip import ZulipAdapter, check_zulip_requirements
+            if not check_zulip_requirements():
+                logger.warning("Zulip: dependencies or credentials not met")
+                return None
+            return ZulipAdapter(config)
 
         return None
     def _is_user_authorized(self, source: SessionSource) -> bool:
@@ -6583,6 +6586,7 @@ class GatewayRunner:
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
             Platform.QQBOT: "QQ_ALLOWED_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOWED_USERS",
+            Platform.ZULIP: "ZULIP_ALLOWED_USERS",
         }
         platform_group_user_env_map = {
             Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_USERS",
@@ -6609,6 +6613,7 @@ class GatewayRunner:
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
+            Platform.ZULIP: "ZULIP_ALLOW_ALL_USERS",
         }
         # Bots admitted by {PLATFORM}_ALLOW_BOTS bypass the human allowlist (#4466).
         platform_allow_bots_map = {
