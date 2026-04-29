@@ -125,6 +125,9 @@ class ZulipAdapter(BasePlatformAdapter):
         # Dedup cache
         self._dedup = MessageDeduplicator()
 
+        # Pending reaction-based approvals: message_id → session_key
+        self._pending_approvals: Dict[str, str] = {}
+
     # ------------------------------------------------------------------
     # Auth helpers
     # ------------------------------------------------------------------
@@ -132,6 +135,31 @@ class ZulipAdapter(BasePlatformAdapter):
     def _auth(self) -> tuple[str, str]:
         """Return (email, api_key) tuple for HTTP Basic Auth."""
         return (self._bot_email, self._api_key)
+
+    async def _subscribe_to_all_streams(self) -> None:
+        """Subscribe the bot to all public streams.
+
+        Zulip only delivers reaction events for streams the bot is subscribed to.
+        This is called once at connect() time to ensure full reaction coverage.
+        """
+        data = await self._api_get("streams", {"include_public": "true", "include_subscribed": "false"})
+        streams = data.get("streams", [])
+        if not streams:
+            logger.debug("Zulip: no unsubscribed public streams found")
+            return
+        subs = [{"name": s["name"]} for s in streams]
+        result = await self._api_post(
+            "users/me/subscriptions",
+            {"subscriptions": json.dumps(subs)},
+        )
+        subscribed = list(result.get("subscribed", {}).values())
+        already = list(result.get("already_subscribed", {}).values())
+        count_new = sum(len(v) for v in subscribed)
+        count_existing = sum(len(v) for v in already)
+        logger.info(
+            "Zulip: stream subscriptions — %d new, %d already subscribed",
+            count_new, count_existing,
+        )
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -199,6 +227,29 @@ class ZulipAdapter(BasePlatformAdapter):
         except aiohttp.ClientError as exc:
             logger.debug("Zulip DELETE %s error: %s", path, exc)
 
+    async def _api_patch(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """PATCH /api/v1/{path} with form-encoded body."""
+        import aiohttp
+        url = f"{self._base_url}/api/v1/{path.lstrip('/')}"
+        try:
+            async with self._session.patch(
+                url, data=payload,
+                auth=aiohttp.BasicAuth(*self._auth()),
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    logger.error("Zulip PATCH %s → %s: %s", path, resp.status, body)
+                    return {}
+                data = await resp.json()
+                if data.get("result") != "success":
+                    logger.error("Zulip PATCH %s error: %s", path, data.get("msg", "unknown"))
+                    return {}
+                return data
+        except aiohttp.ClientError as exc:
+            logger.error("Zulip PATCH %s network error: %s", path, exc)
+            return {}
+
     # ------------------------------------------------------------------
     # Required overrides
     # ------------------------------------------------------------------
@@ -211,7 +262,7 @@ class ZulipAdapter(BasePlatformAdapter):
             logger.error("Zulip: URL, bot email, or API key not configured")
             return False
 
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
         self._closing = False
 
         # Verify credentials + fetch bot identity.
@@ -227,6 +278,10 @@ class ZulipAdapter(BasePlatformAdapter):
             "Zulip: authenticated as %s (id=%s) on %s",
             self._bot_name, self._bot_user_id, self._base_url,
         )
+
+        # Subscribe the bot to all public streams so reaction events are received.
+        # (Zulip only delivers reaction events for streams the bot is subscribed to.)
+        await self._subscribe_to_all_streams()
 
         # Register event queue and start polling.
         if not await self._register_queue():
@@ -355,7 +410,7 @@ class ZulipAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Edit an existing message."""
         formatted = self.format_message(content)
-        data = await self._api_post(f"messages/{message_id}", {"content": formatted})
+        data = await self._api_patch(f"messages/{message_id}", {"content": formatted})
         if not data:
             return SendResult(success=False, error="Failed to edit message")
         return SendResult(success=True, message_id=message_id)
@@ -370,17 +425,24 @@ class ZulipAdapter(BasePlatformAdapter):
         """
         return content
 
+    async def send_typing(
+        self, chat_id: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Send a typing indicator (Zulip supports this for DMs only; no-op for streams)."""
+        # Zulip's /api/v1/typing only works for direct messages.
+        # For stream messages there's no typing indicator, so we skip silently.
+        pass
+
     # ------------------------------------------------------------------
     # Event queue
     # ------------------------------------------------------------------
 
     async def _register_queue(self) -> bool:
-        """Register a Zulip event queue for message events."""
+        """Register a Zulip event queue for message and reaction events."""
         import aiohttp
         url = f"{self._base_url}/api/v1/register"
         payload = {
-            "event_types": json.dumps(["message"]),
-            "all_public_streams": "false",
+            "event_types": json.dumps(["message", "reaction"]),
         }
         try:
             async with self._session.post(
@@ -479,6 +541,8 @@ class ZulipAdapter(BasePlatformAdapter):
             self._last_event_id = max(self._last_event_id, eid)
             if event.get("type") == "message":
                 await self._handle_message_event(event)
+            elif event.get("type") == "reaction":
+                await self._handle_reaction_event(event)
 
     async def _handle_message_event(self, event: Dict[str, Any]) -> None:
         """Process a single Zulip message event."""
@@ -511,9 +575,9 @@ class ZulipAdapter(BasePlatformAdapter):
             chat_type = "channel"
 
             # Mention-gating for stream messages.
-            require_mention = os.getenv(
-                "ZULIP_REQUIRE_MENTION", "true"
-            ).lower() not in ("false", "0", "no")
+            _require_mention_raw = os.getenv("ZULIP_REQUIRE_MENTION", "false")
+            logger.debug("Zulip: ZULIP_REQUIRE_MENTION=%r", _require_mention_raw)
+            require_mention = _require_mention_raw.lower() not in ("false", "0", "no")
 
             free_streams_raw = os.getenv("ZULIP_FREE_STREAMS", "")
             free_streams = {s.strip().lower() for s in free_streams_raw.split(",") if s.strip()}
@@ -527,7 +591,7 @@ class ZulipAdapter(BasePlatformAdapter):
             )
 
             if require_mention and not is_free_stream and not has_mention:
-                logger.debug(
+                logger.warning(
                     "Zulip: skipping stream message without @mention (stream=%s, topic=%s)",
                     stream_name, topic,
                 )
@@ -577,6 +641,98 @@ class ZulipAdapter(BasePlatformAdapter):
 
         await self.handle_message(msg_event)
 
+
+    async def _handle_reaction_event(self, event: Dict[str, Any]) -> None:
+        """Handle a Zulip reaction event for interactive approvals.
+
+        Emoji map:
+          👍  (+1 / thumbs_up) → allow once
+          🔒  (lock)          → allow session
+          ♾️  (infinity)       → allow always
+          👎  (-1 / thumbs_down) → deny
+        """
+        # Only handle "add" reactions (not removes)
+        if event.get("op") != "add":
+            return
+
+        # Ignore reactions from the bot itself
+        user_id = str(event.get("user_id", ""))
+        if user_id and int(user_id) == self._bot_user_id:
+            return
+
+        msg_id = str(event.get("message_id", ""))
+
+        logger.info(
+            "Zulip reaction: msg_id=%s emoji=%r op=%s user=%s pending_keys=%s",
+            msg_id, event.get("emoji_name"), event.get("op"), user_id,
+            list(self._pending_approvals.keys()),
+        )
+
+        if not msg_id or msg_id not in self._pending_approvals:
+            return
+
+        emoji_name = event.get("emoji_name", "").lower()
+        # Normalize common aliases
+        choice_map = {
+            "+1": "once",
+            "thumbs_up": "once",
+            "check_mark": "once",
+            "heavy_check_mark": "once",
+            "white_check_mark": "once",
+            "check": "once",
+            "lock": "session",
+            "infinity": "always",
+            "cross_mark": "deny",
+            "x": "deny",
+            "-1": "deny",
+            "thumbs_down": "deny",
+        }
+        choice = choice_map.get(emoji_name)
+        if not choice:
+            return
+
+        session_key = self._pending_approvals.pop(msg_id)
+        try:
+            from tools.approval import resolve_gateway_approval
+            count = resolve_gateway_approval(session_key, choice)
+            logger.info(
+                "Zulip reaction resolved %d approval(s) for session %s (choice=%s, user=%s)",
+                count, session_key, choice, user_id,
+            )
+        except Exception as exc:
+            logger.error("Failed to resolve gateway approval from Zulip reaction: %s", exc)
+
+    async def send_exec_approval(
+        self,
+        chat_id: str,
+        command: str,
+        session_key: str,
+        description: str = "dangerous command",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a reaction-based exec approval prompt.
+
+        Posts a formatted message and waits for the user to react:
+          ✅ — allow once
+          🔒 — allow session
+          ♾️  — allow always
+          ❌ — deny
+        """
+        cmd_preview = command if len(command) <= 800 else command[:797] + "..."
+        msg = (
+            f"⚠️ **Command Approval Required**\n\n"
+            f"**Reason:** {description}\n\n"
+            f"```\n{cmd_preview}\n```\n\n"
+            f"React to approve or deny:\n"
+            f"- 👍 — allow once\n"
+            f"- 🔒 — allow for this session\n"
+            f"- ♾️ — always allow this pattern\n"
+            f"- 👎 — deny"
+        )
+        result = await self.send(chat_id, msg, metadata=metadata)
+        if result.success and result.message_id:
+            self._pending_approvals[result.message_id] = session_key
+        return result
 
 class _QueueExpiredError(Exception):
     """Raised when Zulip reports BAD_EVENT_QUEUE_ID."""
