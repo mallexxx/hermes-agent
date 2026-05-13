@@ -647,7 +647,7 @@ class ZulipAdapter(BasePlatformAdapter):
 
         Emoji map:
           👍  (+1 / thumbs_up) → allow once
-          🔒  (lock)          → allow session
+          🔒  (locked)         → allow session
           ♾️  (infinity)       → allow always
           👎  (-1 / thumbs_down) → deny
         """
@@ -681,6 +681,7 @@ class ZulipAdapter(BasePlatformAdapter):
             "white_check_mark": "once",
             "check": "once",
             "lock": "session",
+            "locked": "session",
             "infinity": "always",
             "cross_mark": "deny",
             "x": "deny",
@@ -701,6 +702,17 @@ class ZulipAdapter(BasePlatformAdapter):
             )
         except Exception as exc:
             logger.error("Failed to resolve gateway approval from Zulip reaction: %s", exc)
+
+    async def _add_reaction(self, message_id: str | int, emoji_name: str, emoji_code: str) -> None:
+        """Add a Unicode emoji reaction to a message.
+
+        Used to pre-seed approval prompts so web/mobile users see quick-tap
+        reaction buttons without opening the full emoji picker.
+        """
+        await self._api_post(
+            f"messages/{message_id}/reactions",
+            {"emoji_name": emoji_name, "emoji_code": emoji_code, "reaction_type": "unicode_emoji"},
+        )
 
     async def send_exec_approval(
         self,
@@ -732,6 +744,15 @@ class ZulipAdapter(BasePlatformAdapter):
         result = await self.send(chat_id, msg, metadata=metadata)
         if result.success and result.message_id:
             self._pending_approvals[result.message_id] = session_key
+            # Pre-seed reactions so web/mobile shows quick-tap buttons.
+            _APPROVAL_REACTIONS = [
+                ("thumbs_up",   "1f44d"),
+                ("locked",      "1f512"),
+                ("infinity",    "267e"),
+                ("thumbs_down", "1f44e"),
+            ]
+            for emoji_name, emoji_code in _APPROVAL_REACTIONS:
+                await self._add_reaction(result.message_id, emoji_name, emoji_code)
         return result
 
 class _QueueExpiredError(Exception):
