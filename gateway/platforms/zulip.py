@@ -227,6 +227,63 @@ class ZulipAdapter(BasePlatformAdapter):
         except aiohttp.ClientError as exc:
             logger.debug("Zulip DELETE %s error: %s", path, exc)
 
+    async def fetch_thread_history(
+        self,
+        stream_name: str,
+        topic: str,
+        before_id: Optional[int] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Fetch message history for a stream+topic from the Zulip API.
+
+        Returns a list of ``{"role": "user"|"assistant", "content": str}``
+        dicts suitable for use as conversation history, in chronological order.
+        Bot messages (sender_id == self._bot_user_id) become ``role:
+        "assistant"``; every other sender becomes ``role: "user"``.
+
+        Args:
+            stream_name: Zulip stream name.
+            topic: Zulip topic name.
+            before_id: Fetch messages BEFORE this message ID (exclusive).
+                       Omit to fetch the most recent ``limit`` messages.
+            limit: Maximum messages to fetch (clamped to 1–100, default 50).
+        """
+        if not self._session:
+            return []
+
+        limit = max(1, min(limit, 100))
+        narrow = json.dumps([
+            {"operator": "stream", "operand": stream_name},
+            {"operator": "topic", "operand": topic},
+        ])
+        params: Dict[str, Any] = {
+            "narrow": narrow,
+            "anchor": str(before_id) if before_id is not None else "newest",
+            "num_before": limit,
+            "num_after": 0,
+            "include_anchor": "false",
+            "apply_markdown": "false",
+        }
+
+        data = await self._api_get("messages", params)
+        raw_msgs = data.get("messages", [])
+
+        result: List[Dict[str, Any]] = []
+        for m in raw_msgs:
+            content = (m.get("content") or "").strip()
+            if not content:
+                continue
+            sender_id = m.get("sender_id", 0)
+            role = "assistant" if sender_id == self._bot_user_id else "user"
+            entry: Dict[str, Any] = {"role": role, "content": content}
+            # Attach sender name so the agent can distinguish multiple users.
+            sender_name = m.get("sender_full_name") or m.get("sender_email", "")
+            if sender_name and role == "user":
+                entry["content"] = f"[{sender_name}]: {content}"
+            result.append(entry)
+
+        return result
+
     async def _api_patch(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """PATCH /api/v1/{path} with form-encoded body."""
         import aiohttp

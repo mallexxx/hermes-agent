@@ -375,6 +375,56 @@ def _discover(
     }, ensure_ascii=False)
 
 
+def _zulip_thread_search(query: str = "", limit: int = 3) -> Optional[str]:
+    """If the current session is a Zulip stream+topic, fetch thread history from
+    the Zulip API and return it formatted as a session_search result.
+
+    Returns None when not in a Zulip context or on any error, so the caller
+    can fall through to the normal SQLite path.
+    """
+    try:
+        from tools.zulip_thread_tool import zulip_read_thread, _get_session_env
+        platform = _get_session_env("HERMES_SESSION_PLATFORM", "")
+        if platform != "zulip":
+            return None
+        chat_id = _get_session_env("HERMES_SESSION_CHAT_ID", "")
+        thread_id = _get_session_env("HERMES_SESSION_THREAD_ID", "")
+        if not chat_id and not thread_id:
+            return None
+        raw = zulip_read_thread(limit=min(limit * 10, 100))
+        import json as _json
+        data = _json.loads(raw)
+        if not data.get("success"):
+            return None
+        messages = data.get("messages", [])
+        if not messages:
+            return None
+        # If a query was given, do a simple case-insensitive keyword filter.
+        if query:
+            q_lower = query.lower()
+            messages = [m for m in messages if q_lower in m.get("content", "").lower()]
+        if not messages:
+            return None
+        stream = data.get("stream", "")
+        topic = data.get("topic", "")
+        result = {
+            "mode": "zulip_thread",
+            "stream": stream,
+            "topic": topic,
+            "query": query,
+            "count": len(messages),
+            "messages": messages[:limit * 10],
+            "note": (
+                f"These are the actual Zulip messages from {stream}/{topic}. "
+                "This is the authoritative history for this thread."
+            ),
+        }
+        return _json.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        logging.debug("_zulip_thread_search failed, falling back to SQLite: %s", exc)
+        return None
+
+
 def session_search(
     query: str = "",
     role_filter: str = None,
@@ -396,7 +446,19 @@ def session_search(
 
     Scroll wins over discovery when both are set — the agent has explicitly
     asked for a slice of a known session.
+
+    When running inside a Zulip stream+topic, the discovery and browse shapes
+    read from the Zulip thread history directly (the authoritative source),
+    rather than the local SQLite session files.  The scroll shape always uses
+    the SQLite DB since it targets a specific session_id anchor.
     """
+    # Zulip shortcut: for discovery/browse inside a Zulip thread, read from
+    # the Zulip API instead of the local SQLite session files.
+    if not (isinstance(session_id, str) and session_id.strip()):
+        zulip_result = _zulip_thread_search(query=query or "", limit=limit)
+        if zulip_result is not None:
+            return zulip_result
+
     if db is None:
         try:
             from hermes_state import SessionDB
