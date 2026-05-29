@@ -3120,6 +3120,37 @@ class GatewayRunner:
             return
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
+    def _pre_gateway_dispatch_filter(self, event: "MessageEvent") -> Optional[str]:
+        """Synchronous pre-guard filter registered on each adapter.
+
+        Runs the pre_gateway_dispatch plugin hooks BEFORE the adapter creates a
+        session entry in _active_sessions.  Returning "skip" causes handle_message()
+        to drop the event immediately, preventing a phantom session that would
+        trigger false-positive "⚡ Interrupting…" busy-handler notifications in
+        multi-bot setups (e.g. Whale messages arriving at Eagle while Eagle is
+        processing an unrelated task in the same Zulip thread).
+        """
+        is_internal = bool(getattr(event, "internal", False))
+        if is_internal:
+            return None
+
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _hook_results = _invoke_hook(
+                "pre_gateway_dispatch",
+                event=event,
+                gateway=self,
+                session_store=self.session_store,
+            )
+        except Exception:
+            return None
+
+        for _result in _hook_results:
+            if isinstance(_result, dict) and _result.get("action") == "skip":
+                return "skip"
+
+        return None
+
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
         # The cold path (_handle_message) checks _is_user_authorized before
@@ -3246,6 +3277,21 @@ class GatewayRunner:
                 running_agent.interrupt(event.text)
             except Exception:
                 pass  # don't let interrupt failure block the ack
+
+        # Always unblock any pending gateway approval for this session when the
+        # user sends a text message.  Without this the approval event-wait loop
+        # keeps blocking until its own timeout (up to 5 min) even after an
+        # interrupt, leaving the session appearing hung.
+        try:
+            from tools.approval import interrupt_gateway_approvals
+            interrupted = interrupt_gateway_approvals(session_key)
+            if interrupted:
+                logger.info(
+                    "Interrupted %d pending approval(s) for session %s due to user message",
+                    interrupted, session_key,
+                )
+        except Exception as _exc:
+            logger.debug("interrupt_gateway_approvals failed: %s", _exc)
 
         # Check if busy ack is disabled — skip sending but still process the input.
         # Placed before debounce so we don't stamp a "last ack" timestamp that was
@@ -4187,7 +4233,8 @@ class GatewayRunner:
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
             adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
             adapter._busy_text_mode = self._busy_text_mode
-            
+            adapter.set_pre_guard_filter(self._pre_gateway_dispatch_filter)
+
             # Try to connect
             logger.info("Connecting to %s...", platform.value)
             self._update_platform_runtime_status(
@@ -5893,6 +5940,7 @@ class GatewayRunner:
                     adapter.set_busy_session_handler(self._handle_active_session_busy_message)
                     adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
                     adapter._busy_text_mode = self._busy_text_mode
+                    adapter.set_pre_guard_filter(self._pre_gateway_dispatch_filter)
 
                     success = await self._connect_adapter_with_timeout(adapter, platform)
                     if success:
@@ -6863,6 +6911,13 @@ class GatewayRunner:
         #   {"action": "allow"}   /   None          -> normal dispatch
         # Hook runs BEFORE auth so plugins can handle unauthorized senders
         # (e.g. customer handover ingest) without triggering the pairing flow.
+        #
+        # NOTE: if the adapter has a _pre_guard_filter registered (run.py sets
+        # this up), the plugin hook already ran synchronously in handle_message()
+        # before the session guard was created.  We only need to re-run it here
+        # for the "rewrite" / "allow" side-effects and to handle the case where
+        # the adapter does NOT have the filter registered.  "skip" results are
+        # already handled; we check again here only to cover rewrites.
         if not is_internal:
             try:
                 from hermes_cli.plugins import invoke_hook as _invoke_hook
@@ -6892,7 +6947,10 @@ class GatewayRunner:
                     _new_text = _result.get("text")
                     if isinstance(_new_text, str):
                         event = dataclasses.replace(event, text=_new_text)
-                        source = event.source
+                    _new_source = _result.get("source")
+                    if _new_source is not None:
+                        event = dataclasses.replace(event, source=_new_source)
+                    source = event.source
                     break
                 if _action == "allow":
                     break

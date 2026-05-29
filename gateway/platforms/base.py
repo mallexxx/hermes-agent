@@ -1627,6 +1627,12 @@ class BasePlatformAdapter(ABC):
         self._post_delivery_callbacks: Dict[str, Any] = {}
         self._expected_cancelled_tasks: set[asyncio.Task] = set()
         self._busy_session_handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]] = None
+        # Optional synchronous pre-guard filter registered by the gateway runner.
+        # Called in handle_message() BEFORE _active_sessions is checked or modified.
+        # If it returns "skip", the message is dropped immediately without creating
+        # a phantom session entry (prevents false-positive busy-handler notifications
+        # in multi-bot setups where one bot's messages hit another bot's session tracker).
+        self._pre_guard_filter: Optional[Callable[["MessageEvent"], Optional[str]]] = None
         # Auto-TTS on voice input: ``_auto_tts_default`` is the global default
         # (``voice.auto_tts`` in config.yaml, pushed by GatewayRunner on connect).
         # Per-chat overrides live in two sets populated from ``_voice_mode``:
@@ -1880,6 +1886,17 @@ class BasePlatformAdapter(ABC):
     def set_busy_session_handler(self, handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]]) -> None:
         """Set an optional handler for messages arriving during active sessions."""
         self._busy_session_handler = handler
+
+    def set_pre_guard_filter(self, filter_fn: Optional[Callable[["MessageEvent"], Optional[str]]]) -> None:
+        """Register a synchronous pre-guard filter.
+
+        Called at the very start of handle_message(), before _active_sessions is
+        checked or modified.  If the filter returns ``"skip"``, the message is
+        dropped immediately — no session entry is created, no busy-handler fires.
+        This prevents phantom sessions from triggering false-positive interrupt
+        notifications in multi-bot setups.
+        """
+        self._pre_guard_filter = filter_fn
     
     def set_session_store(self, session_store: Any) -> None:
         """
@@ -3411,6 +3428,20 @@ class BasePlatformAdapter(ABC):
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
+
+        # Pre-guard filter: run BEFORE touching _active_sessions so plugins can
+        # drop messages without creating a phantom session entry.  A phantom
+        # session causes the busy-handler to fire (sending "⚡ Interrupting…") for
+        # every subsequent message in the thread until cleanup — even when this
+        # bot should never respond there (e.g. Whale messages in Eagle's view of
+        # a Whale-owned Zulip thread).
+        if self._pre_guard_filter is not None:
+            try:
+                _pre_result = self._pre_guard_filter(event)
+                if _pre_result == "skip":
+                    return
+            except Exception as _pre_exc:
+                logger.debug("pre_guard_filter raised: %s", _pre_exc)
 
         # On-entry self-heal: if the adapter still has an _active_sessions
         # entry for this key but the owner task has already exited (done or
