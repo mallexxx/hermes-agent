@@ -586,6 +586,22 @@ def has_blocking_approval(session_key: str) -> bool:
         return bool(_gateway_queues.get(session_key))
 
 
+def interrupt_gateway_approvals(session_key: str) -> int:
+    """Immediately unblock all pending gateway approvals for a session by marking
+    them as interrupted.  Called when the agent receives a user interrupt (text
+    message sent while an approval is waiting for a reaction).
+
+    Returns the number of approvals interrupted (0 means nothing was pending).
+    """
+    with _lock:
+        queue = _gateway_queues.pop(session_key, [])
+
+    for entry in queue:
+        entry.result = "interrupted"
+        entry.event.set()
+    return len(queue)
+
+
 def submit_pending(session_key: str, approval: dict):
     """Store a pending approval request for a session."""
     with _lock:
@@ -1315,31 +1331,31 @@ def check_all_command_guards(command: str, env_type: str,
                 choice=_outcome,
             )
 
-            if not resolved or choice is None or choice == "deny":
-                # Consent contract: silence is NOT consent, and an explicit
-                # deny is also a hard halt — both produce a BLOCKED outcome
-                # that names the agent's most common evasion paths (retry,
-                # rephrase, achieve the same outcome via a different command).
-                # See issue #24912 for the original incident.
-                if not resolved:
-                    reason = "timed out without user response"
-                    timeout_addendum = " Silence is not consent."
+            if not resolved or choice is None or choice in ("deny", "interrupted"):
+                if choice == "interrupted":
+                    outcome = "interrupted"
+                    msg = (
+                        "BLOCKED: The user sent a message instead of reacting to the "
+                        "approval prompt — the pending command was cancelled. "
+                        "Do NOT retry the same command. Instead, explain to the user "
+                        "what you were trying to do and ask them explicitly whether to "
+                        "proceed, or find an alternative approach that does not require "
+                        "elevated permissions."
+                    )
+                elif not resolved:
                     outcome = "timeout"
+                    msg = (
+                        "BLOCKED: Approval request timed out — the user did not react "
+                        "in time. Do NOT retry this command automatically. "
+                        "Let the user know the request expired and ask if they would "
+                        "like to try again or take a different approach."
+                    )
                 else:
-                    reason = "denied by user"
-                    timeout_addendum = ""
                     outcome = "denied"
+                    msg = "BLOCKED: User denied this command. Do NOT retry."
                 return {
                     "approved": False,
-                    "message": (
-                        f"BLOCKED: Command {reason}. The user has NOT consented "
-                        f"to this action. Do NOT retry this command, do NOT "
-                        f"rephrase it, and do NOT attempt the same outcome via "
-                        f"a different command. Stop the current workflow and "
-                        f"wait for the user to respond before taking any "
-                        f"further destructive or irreversible action."
-                        f"{timeout_addendum}"
-                    ),
+                    "message": msg,
                     "pattern_key": primary_key,
                     "description": combined_desc,
                     "outcome": outcome,
