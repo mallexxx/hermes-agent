@@ -287,7 +287,7 @@ def _discover(
 
     try:
         raw_results = db.search_messages(
-            query=query,
+            query=_sanitize_fts5_query(query),
             role_filter=role_list,
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
             limit=50,  # widen so dedup-by-lineage can find distinct sessions
@@ -375,12 +375,12 @@ def _discover(
     }, ensure_ascii=False)
 
 
-def _zulip_thread_search(query: str = "", limit: int = 3) -> Optional[str]:
-    """If the current session is a Zulip stream+topic, fetch thread history from
-    the Zulip API and return it formatted as a session_search result.
+def _fetch_zulip_thread_context(limit: int = 3) -> Optional[Dict[str, Any]]:
+    """Fetch recent messages from the current Zulip thread.
 
-    Returns None when not in a Zulip context or on any error, so the caller
-    can fall through to the normal SQLite path.
+    Returns a dict with stream/topic/messages, or None if not in a Zulip context
+    or on any error.  Does NOT filter by query — the full recent thread is always
+    the right context when operating inside a Zulip topic.
     """
     try:
         from tools.zulip_thread_tool import zulip_read_thread, _get_session_env
@@ -399,30 +399,28 @@ def _zulip_thread_search(query: str = "", limit: int = 3) -> Optional[str]:
         messages = data.get("messages", [])
         if not messages:
             return None
-        # If a query was given, do a simple case-insensitive keyword filter.
-        if query:
-            q_lower = query.lower()
-            messages = [m for m in messages if q_lower in m.get("content", "").lower()]
-        if not messages:
-            return None
-        stream = data.get("stream", "")
-        topic = data.get("topic", "")
-        result = {
-            "mode": "zulip_thread",
-            "stream": stream,
-            "topic": topic,
-            "query": query,
-            "count": len(messages),
-            "messages": messages[:limit * 10],
-            "note": (
-                f"These are the actual Zulip messages from {stream}/{topic}. "
-                "This is the authoritative history for this thread."
-            ),
+        return {
+            "stream": data.get("stream", ""),
+            "topic": data.get("topic", ""),
+            "messages": messages,
         }
-        return _json.dumps(result, ensure_ascii=False)
     except Exception as exc:
-        logging.debug("_zulip_thread_search failed, falling back to SQLite: %s", exc)
+        logging.debug("_fetch_zulip_thread_context failed: %s", exc)
         return None
+
+
+import re as _re
+_FTS5_COLUMN_PREFIX = _re.compile(r"^\s*\w+\s*:\s*")
+
+
+def _sanitize_fts5_query(query: str) -> str:
+    """Strip leading `word:` column-prefix patterns that break FTS5.
+
+    Agents sometimes prepend context markers like 'recall: ...' or 'find: ...'
+    which FTS5 interprets as column specifiers and throws 'no such column'.
+    Strip the prefix and search the actual topic words.
+    """
+    return _FTS5_COLUMN_PREFIX.sub("", query).strip() or query
 
 
 def session_search(
@@ -447,38 +445,32 @@ def session_search(
     Scroll wins over discovery when both are set — the agent has explicitly
     asked for a slice of a known session.
 
-    When running inside a Zulip stream+topic, the discovery and browse shapes
-    read from the Zulip thread history directly (the authoritative source),
-    rather than the local SQLite session files.  The scroll shape always uses
-    the SQLite DB since it targets a specific session_id anchor.
+    When running inside a Zulip stream+topic:
+    - Browse (no query): returns the current thread history from Zulip.
+    - Discovery (with query): returns the current thread history PLUS any
+      matching past sessions from SQLite, so both the ongoing thread context
+      and cross-session recall work at the same time.
+    - Scroll: always uses SQLite (targets a specific session_id anchor).
     """
-    # Zulip shortcut: for discovery/browse inside a Zulip thread, read from
-    # the Zulip API instead of the local SQLite session files.
-    if not (isinstance(session_id, str) and session_id.strip()):
-        zulip_result = _zulip_thread_search(query=query or "", limit=limit)
-        if zulip_result is not None:
-            return zulip_result
-
-    if db is None:
-        try:
-            from hermes_state import SessionDB
-            db = SessionDB()
-        except Exception:
-            logging.debug("SessionDB unavailable for session_search", exc_info=True)
-            from hermes_state import format_session_db_unavailable
-            return tool_error(format_session_db_unavailable(), success=False)
-
-    # Scroll shape takes precedence — explicit anchor beats any query.
+    # --- Scroll shape: always pure SQLite ---
     if (isinstance(session_id, str) and session_id.strip()) and around_message_id is not None:
+        if db is None:
+            try:
+                from hermes_state import SessionDB
+                db = SessionDB()
+            except Exception:
+                logging.debug("SessionDB unavailable for session_search", exc_info=True)
+                from hermes_state import format_session_db_unavailable
+                return tool_error(format_session_db_unavailable(), success=False)
         return _scroll(
             db=db,
-            session_id=session_id,
+            session_id=session_id.strip(),
             around_message_id=around_message_id,
             window=window,
             current_session_id=current_session_id,
         )
 
-    # Limit clamp [1, 10]
+    # --- Limit clamp [1, 10] ---
     if not isinstance(limit, int):
         try:
             limit = int(limit)
@@ -486,9 +478,86 @@ def session_search(
             limit = 3
     limit = max(1, min(limit, 10))
 
-    # Browse shape: no query → recent sessions.
-    if not query or not isinstance(query, str) or not query.strip():
+    # --- Fetch Zulip thread context (always, when in Zulip) ---
+    zulip_ctx = None
+    if not (isinstance(session_id, str) and session_id.strip()):
+        zulip_ctx = _fetch_zulip_thread_context(limit=limit)
+
+    has_query = bool(query and isinstance(query, str) and query.strip())
+
+    # --- Browse shape (no query) ---
+    if not has_query:
+        # In Zulip: return the current thread as the browse result.
+        if zulip_ctx is not None:
+            import json as _json
+            return _json.dumps({
+                "mode": "zulip_thread",
+                "stream": zulip_ctx["stream"],
+                "topic": zulip_ctx["topic"],
+                "count": len(zulip_ctx["messages"]),
+                "messages": zulip_ctx["messages"],
+                "note": (
+                    f"Current Zulip thread {zulip_ctx['stream']}/{zulip_ctx['topic']}. "
+                    "This is the authoritative history for this thread."
+                ),
+            }, ensure_ascii=False)
+        # Non-Zulip browse: fall through to SQLite recent sessions.
+        if db is None:
+            try:
+                from hermes_state import SessionDB
+                db = SessionDB()
+            except Exception:
+                logging.debug("SessionDB unavailable for session_search", exc_info=True)
+                from hermes_state import format_session_db_unavailable
+                return tool_error(format_session_db_unavailable(), success=False)
         return _list_recent_sessions(db, limit, current_session_id)
+
+    # --- Discovery shape (query present) ---
+    # Sanitize to strip agent-prepended prefixes like 'recall:' that break FTS5.
+    clean_query = _sanitize_fts5_query(query.strip())
+
+    # If sanitization left an empty string, treat as browse.
+    if not clean_query:
+        if zulip_ctx is not None:
+            import json as _json
+            return _json.dumps({
+                "mode": "zulip_thread",
+                "stream": zulip_ctx["stream"],
+                "topic": zulip_ctx["topic"],
+                "count": len(zulip_ctx["messages"]),
+                "messages": zulip_ctx["messages"],
+                "note": (
+                    f"Current Zulip thread {zulip_ctx['stream']}/{zulip_ctx['topic']}."
+                ),
+            }, ensure_ascii=False)
+        if db is None:
+            try:
+                from hermes_state import SessionDB
+                db = SessionDB()
+            except Exception:
+                from hermes_state import format_session_db_unavailable
+                return tool_error(format_session_db_unavailable(), success=False)
+        return _list_recent_sessions(db, limit, current_session_id)
+
+    # Run SQLite FTS5 discovery.
+    if db is None:
+        try:
+            from hermes_state import SessionDB
+            db = SessionDB()
+        except Exception:
+            logging.debug("SessionDB unavailable for session_search", exc_info=True)
+            from hermes_state import format_session_db_unavailable
+            # If SQLite unavailable but we have Zulip context, return that.
+            if zulip_ctx is not None:
+                import json as _json
+                return _json.dumps({
+                    "mode": "zulip_thread",
+                    "stream": zulip_ctx["stream"],
+                    "topic": zulip_ctx["topic"],
+                    "count": len(zulip_ctx["messages"]),
+                    "messages": zulip_ctx["messages"],
+                }, ensure_ascii=False)
+            return tool_error(format_session_db_unavailable(), success=False)
 
     # Parse role_filter
     role_list: Optional[List[str]] = None
@@ -502,14 +571,39 @@ def session_search(
         if candidate in ("newest", "oldest"):
             sort_norm = candidate
 
-    return _discover(
+    sqlite_result_str = _discover(
         db=db,
-        query=query.strip(),
+        query=clean_query,
         role_filter=role_list,
         limit=limit,
         sort=sort_norm,
         current_session_id=current_session_id,
     )
+
+    # If not in Zulip, return SQLite result as-is.
+    if zulip_ctx is None:
+        return sqlite_result_str
+
+    # In Zulip: merge current thread context + past SQLite sessions into one response.
+    import json as _json
+    try:
+        sqlite_data = _json.loads(sqlite_result_str)
+    except Exception:
+        sqlite_data = {}
+
+    return _json.dumps({
+        "mode": "zulip_and_sessions",
+        "current_thread": {
+            "stream": zulip_ctx["stream"],
+            "topic": zulip_ctx["topic"],
+            "count": len(zulip_ctx["messages"]),
+            "messages": zulip_ctx["messages"],
+            "note": "Current Zulip thread — authoritative history for this conversation.",
+        },
+        "past_sessions": sqlite_data.get("results", []),
+        "past_sessions_count": sqlite_data.get("count", 0),
+        "query": clean_query,
+    }, ensure_ascii=False)
 
 
 def check_session_search_requirements() -> bool:
