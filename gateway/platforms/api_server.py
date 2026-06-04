@@ -2037,17 +2037,32 @@ class APIServerAdapter(BasePlatformAdapter):
                 """Write a single queue item to the SSE stream.
 
                 Plain strings are sent as normal ``delta.content`` chunks.
-                Tagged tuples ``("__tool_progress__", payload)`` are sent
-                as a custom ``event: hermes.tool.progress`` SSE event so
-                frontends can display them without storing the markers in
-                conversation history.  See #6972 for the original event,
-                #16588 for the ``toolCallId``/``status`` lifecycle fields.
+                Tagged tuples ``("__tool_progress__", payload)`` are silently
+                dropped on the /v1/chat/completions endpoint: standard OpenAI
+                clients (e.g. SpeakGPT, openai-kotlin) parse every SSE event
+                regardless of the ``event:`` type and crash when they encounter
+                a payload without the required ``id``/``created``/``model``/
+                ``choices`` fields.  Tool progress is visible in the final
+                assistant turn; real-time progress is only meaningful for
+                Hermes-native frontends that use the /v1/responses stream.
                 """
                 if isinstance(item, tuple) and len(item) == 2 and item[0] == "__tool_progress__":
-                    event_data = json.dumps(item[1])
-                    await response.write(
-                        f"event: hermes.tool.progress\ndata: {event_data}\n\n".encode()
-                    )
+                    payload = item[1]
+                    status = payload.get("status", "")
+                    label = payload.get("label") or payload.get("tool", "")
+                    emoji = payload.get("emoji", "🔧")
+                    if status == "running" and label:
+                        text = f"\n{emoji} *{label}*…\n"
+                    elif status == "completed" and label:
+                        text = f"✓ {label}\n"
+                    else:
+                        return
+                    progress_chunk = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": model,
+                        "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                    }
+                    await response.write(f"data: {json.dumps(progress_chunk)}\n\n".encode())
                 else:
                     content_chunk = {
                         "id": completion_id, "object": "chat.completion.chunk",
