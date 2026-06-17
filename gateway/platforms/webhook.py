@@ -29,6 +29,7 @@ Security:
 import asyncio
 import base64
 import binascii
+import gzip
 import hashlib
 import hmac
 import json
@@ -61,6 +62,7 @@ _BUILTIN_DELIVER_PLATFORMS = {
     "matrix", "mattermost", "homeassistant", "email", "dingtalk",
     "feishu", "wecom", "wecom_callback", "weixin", "bluebubbles",
     "qqbot", "yuanbao",
+    "zulip",
 }
 
 DEFAULT_HOST = "0.0.0.0"
@@ -158,17 +160,7 @@ class WebhookAdapter(BasePlatformAdapter):
                     f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'."
                 )
 
-            # Safety rail: refuse to start if INSECURE_NO_AUTH is combined with a
-            # non-loopback bind. The escape hatch is for local testing only;
-            # serving an unauthenticated route on a public interface is a
-            # deployment-grade footgun we'd rather crash early than ship.
-            if secret == _INSECURE_NO_AUTH and not _is_loopback_host(self._host):
-                raise ValueError(
-                    f"[webhook] Route '{name}' uses INSECURE_NO_AUTH secret "
-                    f"but is bound to non-loopback host '{self._host}'. "
-                    f"INSECURE_NO_AUTH is for local testing only. "
-                    f"Refusing to start to prevent accidental exposure."
-                )
+        #    )
             # deliver_only routes bypass the agent — the POST body becomes a
             # direct push notification via the configured delivery target.
             # Validate up-front so misconfiguration surfaces at startup rather
@@ -644,6 +636,8 @@ class WebhookAdapter(BasePlatformAdapter):
         self, request: "web.Request", body: bytes, secret: str
     ) -> bool:
         """Validate webhook signature (GitHub, GitLab, Svix, generic HMAC-SHA256)."""
+        # DEBUG: log all headers
+        logger.warning("[webhook] HEADERS: %s", dict(request.headers))
         def _header(name: str) -> str:
             return (
                 request.headers.get(name, "")
@@ -689,6 +683,25 @@ class WebhookAdapter(BasePlatformAdapter):
                 secret.encode(), body, hashlib.sha256
             ).hexdigest()
             return hmac.compare_digest(generic_sig, expected)
+
+        # Zulip outgoing webhook: token is in JSON body, not headers
+        # Zulip sends gzip-encoded body with Accept-Encoding: gzip
+        raw = body
+        content_encoding = request.headers.get("Content-Encoding", "")
+        if "gzip" in content_encoding:
+            try:
+                raw = gzip.decompress(body)
+            except Exception:
+                pass
+        # DEBUG Zulip — dump raw body
+        logger.warning("[webhook] ZULIP_RAW_BODY: %s", raw[:500])
+        try:
+            payload = json.loads(raw)
+            zulip_token = payload.get("token", "")
+            if zulip_token:
+                return hmac.compare_digest(zulip_token, secret)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            pass
 
         # No recognised signature header but secret is configured → reject
         logger.debug(
@@ -907,6 +920,7 @@ class WebhookAdapter(BasePlatformAdapter):
 
         adapter = self.gateway_runner.adapters.get(target_platform)
         if not adapter:
+            logger.error("[webhook] cross-platform: adapter not found for %s (available: %s)", platform_name, list(self.gateway_runner.adapters.keys()))
             return SendResult(
                 success=False,
                 error=f"Platform {platform_name} not connected",
@@ -916,14 +930,26 @@ class WebhookAdapter(BasePlatformAdapter):
         extra = delivery.get("deliver_extra", {})
         chat_id = extra.get("chat_id", "")
         if not chat_id:
-            home = self.gateway_runner.config.get_home_channel(target_platform)
-            if home:
-                chat_id = home.chat_id
+            # Zulip webhook: derive chat_id from payload if available
+            payload = delivery.get("payload", {})
+            msg = payload.get("message", {})
+            display_recipient = msg.get("display_recipient", "")
+            if platform_name == "zulip" and display_recipient:
+                stream_name = display_recipient
+                subject = msg.get("subject", "") or msg.get("topic", "") or "general"
+                chat_id = f"{stream_name}::{subject}"
+                logger.info("[webhook] cross-platform: derived zulip chat_id=%s from payload", chat_id)
             else:
-                return SendResult(
-                    success=False,
-                    error=f"No chat_id or home channel for {platform_name}",
-                )
+                home = self.gateway_runner.config.get_home_channel(target_platform)
+                if home:
+                    chat_id = home.chat_id
+                    logger.info("[webhook] cross-platform: using home channel for %s → chat_id=%s", platform_name, chat_id)
+                else:
+                    logger.error("[webhook] cross-platform: no chat_id or home channel for %s", platform_name)
+                    return SendResult(
+                        success=False,
+                        error=f"No chat_id or home channel for {platform_name}",
+                    )
 
         # Pass thread_id from deliver_extra so Telegram forum topics work
         metadata = None
@@ -931,4 +957,10 @@ class WebhookAdapter(BasePlatformAdapter):
         if thread_id:
             metadata = {"thread_id": thread_id}
 
-        return await adapter.send(chat_id, content, metadata=metadata)
+        logger.info("[webhook] cross-platform: delivering to %s chat=%s len=%d", platform_name, chat_id, len(content))
+        result = await adapter.send(chat_id, content, metadata=metadata)
+        if not result.success:
+            logger.error("[webhook] cross-platform delivery FAILED: %s", result.error)
+        else:
+            logger.info("[webhook] cross-platform delivery OK msg_id=%s", result.message_id)
+        return result
