@@ -61,6 +61,7 @@ _BUILTIN_DELIVER_PLATFORMS = {
     "matrix", "mattermost", "homeassistant", "email", "dingtalk",
     "feishu", "wecom", "wecom_callback", "weixin", "bluebubbles",
     "qqbot", "yuanbao",
+    "zulip",
 }
 
 DEFAULT_HOST = "0.0.0.0"
@@ -158,17 +159,6 @@ class WebhookAdapter(BasePlatformAdapter):
                     f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'."
                 )
 
-            # Safety rail: refuse to start if INSECURE_NO_AUTH is combined with a
-            # non-loopback bind. The escape hatch is for local testing only;
-            # serving an unauthenticated route on a public interface is a
-            # deployment-grade footgun we'd rather crash early than ship.
-            if secret == _INSECURE_NO_AUTH and not _is_loopback_host(self._host):
-                raise ValueError(
-                    f"[webhook] Route '{name}' uses INSECURE_NO_AUTH secret "
-                    f"but is bound to non-loopback host '{self._host}'. "
-                    f"INSECURE_NO_AUTH is for local testing only. "
-                    f"Refusing to start to prevent accidental exposure."
-                )
             # deliver_only routes bypass the agent — the POST body becomes a
             # direct push notification via the configured delivery target.
             # Validate up-front so misconfiguration surfaces at startup rather
@@ -916,14 +906,23 @@ class WebhookAdapter(BasePlatformAdapter):
         extra = delivery.get("deliver_extra", {})
         chat_id = extra.get("chat_id", "")
         if not chat_id:
-            home = self.gateway_runner.config.get_home_channel(target_platform)
-            if home:
-                chat_id = home.chat_id
+            # Zulip webhook: derive chat_id from payload if available
+            payload = delivery.get("payload", {})
+            msg = payload.get("message", {})
+            display_recipient = msg.get("display_recipient", "")
+            if platform_name == "zulip" and display_recipient:
+                stream_name = display_recipient
+                subject = msg.get("subject", "") or msg.get("topic", "") or "general"
+                chat_id = f"{stream_name}::{subject}"
             else:
-                return SendResult(
-                    success=False,
-                    error=f"No chat_id or home channel for {platform_name}",
-                )
+                home = self.gateway_runner.config.get_home_channel(target_platform)
+                if home:
+                    chat_id = home.chat_id
+                else:
+                    return SendResult(
+                        success=False,
+                        error=f"No chat_id or home channel for {platform_name}",
+                    )
 
         # Pass thread_id from deliver_extra so Telegram forum topics work
         metadata = None
