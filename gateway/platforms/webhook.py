@@ -568,9 +568,27 @@ class WebhookAdapter(BasePlatformAdapter):
                 status=502,
             )
 
-        # Use delivery_id in session key so concurrent webhooks on the
-        # same route get independent agent runs (not queued/interrupted).
-        session_chat_id = f"webhook:{route_name}:{delivery_id}"
+        # Determine session_chat_id for grouping messages into conversations.
+        #
+        # Priority order:
+        #   1. X-Chat-Id header (set by zulip-router with stream::topic)
+        #   2. Zulip outgoing webhook payload (message.display_recipient::subject)
+        #   3. Fallback to delivery_id (one-shot, no context)
+        #
+        # This lets Zulip webhook messages (both via router and direct @mentions)
+        # share a session per stream::topic instead of starting fresh on every POST.
+        chat_id_override = request.headers.get("X-Chat-Id", "")
+        if chat_id_override:
+            session_chat_id = f"webhook:{route_name}:{chat_id_override}"
+        else:
+            # Zulip outgoing webhook: group by stream::topic
+            msg = payload.get("message", {})
+            dr = msg.get("display_recipient", "")
+            subj = msg.get("subject", "") or msg.get("topic", "") or ""
+            if dr and subj:
+                session_chat_id = f"webhook:{route_name}:{dr}::{subj}"
+            else:
+                session_chat_id = f"webhook:{route_name}:{delivery_id}"
 
         # Store delivery info for send().  Read by every send() invocation
         # for this chat_id (interim status messages and the final response),
