@@ -74,6 +74,12 @@ class StreamConsumerConfig:
     # "group", "supergroup", "forum").  Used to gate native draft streaming,
     # which is platform-specific (Telegram drafts are DM-only).
     chat_type: str = ""
+    # When False, the adapter doesn't support message editing (e.g. webhook).
+    # The consumer uses this instead of the runtime _edit_supported flag
+    # to decide whether to add the streaming cursor — _edit_supported may
+    # still be True during the first few stream ticks before the first
+    # edit attempt reveals the adapter's capability.
+    adapter_supports_edit: bool = True
 
 
 class GatewayStreamConsumer:
@@ -542,23 +548,58 @@ class GatewayStreamConsumer:
                         self._message_id = None
                         self._last_sent_text = ""
 
-                    display_text = self._accumulated
-                    if not got_done and not got_segment_break and commentary_text is None:
-                        display_text += self.cfg.cursor
+                    if self.cfg.adapter_supports_edit:
+                        logger.warning(
+                            "[whale-nl] send: adapter_supports_edit=%s",
+                            self.cfg.adapter_supports_edit,
+                        )
 
-                    # Segment break: finalize the current message so platforms
-                    # that need explicit closure (e.g. DingTalk AI Cards) don't
-                    # leave the previous segment stuck in a loading state when
-                    # the next segment (tool progress, next chunk) creates a
-                    # new message below it.  got_done has its own finalize
-                    # path below so we don't finalize here for it.
-                    current_update_visible = await self._send_or_edit(
-                        display_text,
-                        finalize=(got_done or got_segment_break),
-                        # A segment-break finalize closes a preamble, not the
-                        # turn-final answer — only got_done marks delivered (#29346).
-                        is_turn_final=got_done,
-                    )
+                        # Editing supported: use cursor for in-flight indicators
+                        display_text = self._accumulated
+                        if not got_done and not got_segment_break and commentary_text is None:
+                            display_text += self.cfg.cursor
+                        current_update_visible = await self._send_or_edit(
+                            display_text,
+                            finalize=(got_done or got_segment_break),
+                            # A segment-break finalize closes a preamble, not the
+                            # turn-final answer — only got_done marks delivered (#29346).
+                            is_turn_final=got_done,
+                        )
+                    else:
+                        # Editing not supported: split by newlines, no cursor.
+                        # Only send partials when we have a complete line ending
+                        # with \n, or when the generation ends (got_done).
+                        _has_nl = "\n" in self._accumulated
+                        logger.warning("[whale-nl] check: has_nl=%s text_len=%d accum=[%s]",
+                                       _has_nl, len(self._accumulated), self._accumulated)
+                        _should_send = got_done or got_segment_break or commentary_text is not None or _has_nl
+                        if _should_send:
+                            if not got_done and not got_segment_break and commentary_text is None:
+                                # Send only complete lines (up to last \n)
+                                _nl_pos = self._accumulated.rfind("\n")
+                                _send_text = self._accumulated[:_nl_pos + 1] if _nl_pos >= 0 else self._accumulated
+                            else:
+                                _send_text = self._accumulated
+                            logger.warning(
+                                "[whale-nl] send: has_nl=%s got_done=%s segbreak=%s comm=%s text_len=%d",
+                                _has_nl, got_done, got_segment_break,
+                                commentary_text is not None, len(_send_text),
+                            )
+                            _sent_len = len(_send_text)
+                            current_update_visible = await self._send_or_edit(
+                                _send_text,
+                                finalize=(got_done or got_segment_break),
+                                is_turn_final=got_done,
+                            )
+                            # Remove sent partial from accumulated text
+                            if _sent_len and not got_done and not got_segment_break:
+                                self._accumulated = self._accumulated[_sent_len:]
+                        else:
+                            logger.warning(
+                                "[whale-nl] skip: text_len=%d (no newline yet)",
+                                len(self._accumulated),
+                            )
+                            current_update_visible = False
                     self._last_edit_time = time.monotonic()
 
                 if got_done:

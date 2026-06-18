@@ -16708,7 +16708,14 @@ class GatewayRunner:
                 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
                 _adapter = self.adapters.get(source.platform)
                 if _adapter:
-                    _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
+                    # Per-platform config override of edit support
+                    _plat_cfg = user_config.get("platforms", {}).get(platform_key, {})
+                    _extra = _plat_cfg.get("extra", {}) if isinstance(_plat_cfg, dict) else {}
+                    _cfg_edit = _extra.get("supports_message_editing")
+                    if _cfg_edit is not None:
+                        _adapter_supports_edit = bool(_cfg_edit)
+                    else:
+                        _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
                     _effective_cursor = _scfg.cursor if _adapter_supports_edit else ""
                     _buffer_only = False
                     if source.platform == Platform.MATRIX:
@@ -16723,10 +16730,13 @@ class GatewayRunner:
                         if source.platform == Platform.TELEGRAM
                         else 0.0
                     )
+                    logger.warning("[whale-cfg2] platform_key=%s _adapter_supports_edit=%s",
+                                   platform_key, _adapter_supports_edit)
                     _consumer_cfg = StreamConsumerConfig(
                         edit_interval=_scfg.edit_interval,
                         buffer_threshold=_scfg.buffer_threshold,
                         cursor=_effective_cursor,
+                        adapter_supports_edit=_adapter_supports_edit,
                         buffer_only=_buffer_only,
                         fresh_final_after_seconds=_fresh_final_secs,
                         transport=_scfg.transport or "edit",
@@ -17665,10 +17675,19 @@ class GatewayRunner:
                         # without edit support, the consumer sends a partial
                         # first message that can never be updated, resulting in
                         # duplicate messages (partial + final).
-                        _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
+                        # Per-platform config override of edit support
+                        _plat_cfg2 = user_config.get("platforms", {}).get(platform_key, {})
+                        _extra2 = _plat_cfg2.get("extra", {}) if isinstance(_plat_cfg2, dict) else {}
+                        _cfg_edit2 = _extra2.get("supports_message_editing")
+                        if _cfg_edit2 is not None:
+                            _adapter_supports_edit = bool(_cfg_edit2)
+                        else:
+                            _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
                         if not _adapter_supports_edit:
-                            raise RuntimeError("skip streaming for non-editable platform")
-                        _effective_cursor = _scfg.cursor
+                            # Non-editable platforms use newline-split streaming (no cursor)
+                            _effective_cursor = ""
+                        else:
+                            _effective_cursor = _scfg.cursor
                         # Some Matrix clients render the streaming cursor
                         # as a visible tofu/white-box artifact.  Keep
                         # streaming text on Matrix, but suppress the cursor.
@@ -17685,10 +17704,13 @@ class GatewayRunner:
                             if source.platform == Platform.TELEGRAM
                             else 0.0
                         )
+                        logger.warning("[whale-cfg] platform_key=%s _adapter_supports_edit=%s",
+                                       platform_key, _adapter_supports_edit)
                         _consumer_cfg = StreamConsumerConfig(
                             edit_interval=_scfg.edit_interval,
                             buffer_threshold=_scfg.buffer_threshold,
                             cursor=_effective_cursor,
+                            adapter_supports_edit=_adapter_supports_edit,
                             buffer_only=_buffer_only,
                             fresh_final_after_seconds=_fresh_final_secs,
                             transport=_scfg.transport or "edit",
