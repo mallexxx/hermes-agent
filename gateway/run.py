@@ -18054,12 +18054,23 @@ class GatewayRunner:
 
                 # Fallback: plain text approval prompt
                 cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
+                if source and source.platform and source.platform != Platform.WEBHOOK:
+                    # Generic instructions for non-webhook platforms (CLI, etc.)
+                    approval_instructions = (
+                        "Reply `/approve` to execute, `/approve session` to approve this pattern "
+                        "for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+                    )
+                else:
+                    # Webhook (Zulip via router): reaction-based approval
+                    approval_instructions = (
+                        "React 👍 to approve once, 🔒 to approve for the session, "
+                        "♾️ to approve permanently, or 👎 to deny."
+                    )
                 msg = (
                     f"⚠️ **Dangerous command requires approval:**\n"
                     f"```\n{cmd_preview}\n```\n"
                     f"Reason: {desc}\n\n"
-                    f"Reply `/approve` to execute, `/approve session` to approve this pattern "
-                    f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+                    f"{approval_instructions}"
                 )
                 try:
                     _approval_send_fut = safe_schedule_threadsafe(

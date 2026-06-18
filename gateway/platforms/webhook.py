@@ -617,6 +617,21 @@ class WebhookAdapter(BasePlatformAdapter):
         # MessageEvent.is_command() which checks text.startswith("/").
         prompt = prompt.strip().removeprefix("{").removesuffix("}").strip()
 
+        # Handle approval trigger from reaction events.
+        # zulip-router sends trigger="approve:once" etc. for reaction-based approvals.
+        # Convert to /approve or /deny text so _message_handler processes it.
+        trigger_raw = payload.get("trigger", "")
+        if trigger_raw.startswith("approve:"):
+            choice = trigger_raw.split(":", 1)[1]
+            if choice == "deny":
+                prompt = "/deny"
+            elif choice in ("once", "session", "always"):
+                prompt = "/approve" + (f" {choice}" if choice != "once" else "")
+            logger.debug(
+                "[webhook] Approval trigger: %s → prompt=%s route=%s",
+                trigger_raw, prompt, route_name,
+            )
+
         event = MessageEvent(
             text=prompt,
             message_type=MessageType.TEXT,

@@ -1444,16 +1444,51 @@ class MessageEvent:
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
     
+    def _strip_mention(self, text: str) -> str:
+        """Strip leading @mention from a message text.
+
+        Handles Zulip format (``@**Name**``), plain ``@name``, and
+        Telegram/Discord formats.  Returns the text after the mention,
+        or the original text if no mention is found.
+        """
+        stripped = text.lstrip()
+        # Zulip: @**Name** or @**Name with spaces**
+        if stripped.startswith("@**"):
+            end = stripped.find("**", 3)
+            if end != -1:
+                rest = stripped[end + 2 :].lstrip()
+                # If the rest looks empty or starts with / it's a mention
+                if not rest or rest.startswith("/"):
+                    return rest
+        # Plain @name
+        if stripped.startswith("@"):
+            # Find end of mention: space or EOS
+            rest = stripped[1:].lstrip()
+            # Rest after @ could be "name /command" — split on first space
+            if " " in rest:
+                possible_name, after = rest.split(" ", 1)
+                # Check if the name part looks like a mention (no slashes)
+                if "/" not in possible_name and possible_name:
+                    rest = after.lstrip()
+                    if not rest or rest.startswith("/"):
+                        return rest
+                return text  # Not a mention, return as-is
+            # Single word after @ — could be mention
+            return text
+        return text
+
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""
-        return self.text.startswith("/")
+        return self._strip_mention(self.text).startswith("/")
     
     def get_command(self) -> Optional[str]:
         """Extract command name if this is a command message."""
-        if not self.is_command():
+        # Strip leading mention first so @mention /approve is recognised
+        cleaned = self._strip_mention(self.text)
+        if not cleaned.startswith("/"):
             return None
         # Split on space and get first word, strip the /
-        parts = self.text.split(maxsplit=1)
+        parts = cleaned.split(maxsplit=1)
         raw = parts[0][1:].lower() if parts else None
         if raw and "@" in raw:
             raw = raw.split("@", 1)[0]
