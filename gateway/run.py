@@ -17179,7 +17179,10 @@ class GatewayRunner:
             # Skip tool progress for platforms that don't support message
             # editing (e.g. iMessage/BlueBubbles) — each progress update
             # would become a separate message bubble, which is noisy.
-            if type(adapter).edit_message is BasePlatformAdapter.edit_message:
+            # Webhook is an exception — tool progress is explicitly configured
+            # via display.platforms.webhook.tool_progress.
+            if type(adapter).edit_message is BasePlatformAdapter.edit_message \
+                    and source.platform != Platform.WEBHOOK:
                 while not progress_queue.empty():
                     try:
                         progress_queue.get_nowait()
