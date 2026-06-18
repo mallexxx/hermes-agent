@@ -3483,6 +3483,14 @@ class GatewayRunner:
                 merge_text=event.message_type == MessageType.TEXT,
             )
 
+        # /approve and /deny MUST NOT interrupt the running agent or the pending
+        # gateway approvals.  These commands are handled in _message_handler
+        # (~line 7822-7826 / 8238-8242), which reads the blocked approval state.
+        # Interrupting here (lines below) destroys the approval before the handler
+        # gets to process it, producing a "no pending approvals" response.
+        if event.get_command() in {"approve", "deny"}:
+            return True
+
         is_queue_mode = effective_mode == "queue"
         is_steer_mode = effective_mode == "steer"
 
