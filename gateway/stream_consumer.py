@@ -568,23 +568,24 @@ class GatewayStreamConsumer:
                     else:
                         # Editing not supported: split by newlines, no cursor.
                         # Only send partials when we have a complete line ending
-                        # with \n, or when the generation ends (got_done).
-                        _has_nl = "\n" in self._accumulated
-                        logger.warning("[whale-nl] check: has_nl=%s text_len=%d accum=[%s]",
-                                       _has_nl, len(self._accumulated), self._accumulated)
-                        _should_send = got_done or got_segment_break or commentary_text is not None or _has_nl
+                        # with \\n, or when the generation ends (got_done).
+                        # Rate-limit intermediate partials by edit_interval to
+                        # avoid flooding the platform with rapid sends.
+                        _has_nl = "\\n" in self._accumulated
+                        _can_send = (
+                            got_done
+                            or got_segment_break
+                            or commentary_text is not None
+                            or (elapsed >= self._current_edit_interval)
+                        )
+                        _should_send = _has_nl and _can_send
                         if _should_send:
                             if not got_done and not got_segment_break and commentary_text is None:
-                                # Send only complete lines (up to last \n)
-                                _nl_pos = self._accumulated.rfind("\n")
+                                # Send only complete lines (up to last \\n)
+                                _nl_pos = self._accumulated.rfind("\\n")
                                 _send_text = self._accumulated[:_nl_pos + 1] if _nl_pos >= 0 else self._accumulated
                             else:
                                 _send_text = self._accumulated
-                            logger.warning(
-                                "[whale-nl] send: has_nl=%s got_done=%s segbreak=%s comm=%s text_len=%d",
-                                _has_nl, got_done, got_segment_break,
-                                commentary_text is not None, len(_send_text),
-                            )
                             _sent_len = len(_send_text)
                             current_update_visible = await self._send_or_edit(
                                 _send_text,
@@ -595,10 +596,6 @@ class GatewayStreamConsumer:
                             if _sent_len and not got_done and not got_segment_break:
                                 self._accumulated = self._accumulated[_sent_len:]
                         else:
-                            logger.warning(
-                                "[whale-nl] skip: text_len=%d (no newline yet)",
-                                len(self._accumulated),
-                            )
                             current_update_visible = False
                     self._last_edit_time = time.monotonic()
 
