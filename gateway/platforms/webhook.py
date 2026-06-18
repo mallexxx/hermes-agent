@@ -612,6 +612,11 @@ class WebhookAdapter(BasePlatformAdapter):
             user_id=f"webhook:{route_name}",
             user_name=route_name,
         )
+        # Strip wrapping braces that Zulip clients/avatars may add.
+        # Users send /approve but it arrives as {/approve}, breaking
+        # MessageEvent.is_command() which checks text.startswith("/").
+        prompt = prompt.strip().removeprefix("{").removesuffix("}").strip()
+
         event = MessageEvent(
             text=prompt,
             message_type=MessageType.TEXT,

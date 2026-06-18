@@ -8167,6 +8167,11 @@ class GatewayRunner:
             return await self._handle_restart_command(event)
         
         if canonical == "stop":
+            from hermes_cli.commands import resolve_command as _resolve_cmd2
+            _check2 = event.get_command()
+            _cmddef2 = _resolve_cmd2(_check2) if _check2 else None
+            logger.info("DEBUG /stop cold path: command=%r canonical=%r get_command=%r cmd_def=%r",
+                         command, canonical, _check2, _cmddef2)
             return await self._handle_stop_command(event)
         
         if canonical == "reasoning":
@@ -14783,6 +14788,13 @@ class GatewayRunner:
         from tools.approval import (
             resolve_gateway_approval, has_blocking_approval,
         )
+        # DEBUG: check queue keys
+        try:
+            from tools.approval import _gateway_queues as _q
+            logger.info("[approve-debug] session_key=%s has_blocking=%s queue_keys=%s",
+                         session_key, has_blocking_approval(session_key), list(_q.keys()))
+        except Exception as _e:
+            logger.info("[approve-debug] queue check failed: %s", _e)
 
         if not has_blocking_approval(session_key):
             if session_key in self._pending_approvals:
@@ -14829,6 +14841,13 @@ class GatewayRunner:
         from tools.approval import (
             resolve_gateway_approval, has_blocking_approval,
         )
+        # DEBUG: check queue keys
+        try:
+            from tools.approval import _gateway_queues as _q
+            logger.info("[deny-debug] session_key=%s has_blocking=%s queue_keys=%s",
+                         session_key, has_blocking_approval(session_key), list(_q.keys()))
+        except Exception as _e:
+            logger.info("[deny-debug] queue check failed: %s", _e)
 
         if not has_blocking_approval(session_key):
             if session_key in self._pending_approvals:

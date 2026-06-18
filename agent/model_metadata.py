@@ -145,6 +145,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     "claude-opus-4.8": 1000000,
     "claude-opus-4-7": 1000000,
     "claude-opus-4.7": 1000000,
+    "opus[1m]": 1000000,
     "claude-opus-4-6": 1000000,
     "claude-sonnet-4-6": 1000000,
     "claude-opus-4.6": 1000000,

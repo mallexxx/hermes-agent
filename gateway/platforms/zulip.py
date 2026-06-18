@@ -125,6 +125,13 @@ class ZulipAdapter(BasePlatformAdapter):
         # Dedup cache
         self._dedup = MessageDeduplicator()
 
+        # Polling disabled flag: when set, connect() skips event queue registration
+        # and poll loop. The adapter still answers API calls (send, typing, etc.)
+        self._polling_disabled: bool = (
+            os.getenv("ZULIP_POLLING_DISABLED", "").lower()
+            in ("1", "true", "yes")
+        )
+
         # Pending reaction-based approvals: message_id → session_key
         self._pending_approvals: Dict[str, str] = {}
 
@@ -339,6 +346,16 @@ class ZulipAdapter(BasePlatformAdapter):
         # Subscribe the bot to all public streams so reaction events are received.
         # (Zulip only delivers reaction events for streams the bot is subscribed to.)
         await self._subscribe_to_all_streams()
+
+        # When polling is disabled, skip event queue registration and poll loop.
+        # The adapter is kept alive only for outbound API calls (send, typing, etc.).
+        if self._polling_disabled:
+            logger.info(
+                "Zulip: polling disabled by ZULIP_POLLING_DISABLED — "
+                "skipping event queue registration (outbound API only)"
+            )
+            self._mark_connected()
+            return True
 
         # Register event queue and start polling.
         if not await self._register_queue():
