@@ -566,27 +566,40 @@ class GatewayStreamConsumer:
                             is_turn_final=got_done,
                         )
                     else:
-                        # Editing not supported (e.g. webhook): no cursor,
-                        # no progressive edits. Send accumulated text based
-                        # on elapsed time (edit_interval) or buffer size
-                        # (buffer_threshold), mirroring the edit-supported
-                        # path above but without the cursor suffix.
-                        _should_send = (
-                            got_done
-                            or got_segment_break
-                            or commentary_text is not None
-                            or (elapsed >= self._current_edit_interval
-                                and self._accumulated)
-                            or len(self._accumulated) >= self.cfg.buffer_threshold
-                        )
+                        # Editing not supported: split by newlines, no cursor.
+                        # Only send partials when we have a complete line ending
+                        # with \n, or when the generation ends (got_done).
+                        _has_nl = "\n" in self._accumulated
+                        logger.warning("[whale-nl] check: has_nl=%s text_len=%d accum=[%s]",
+                                       _has_nl, len(self._accumulated), self._accumulated)
+                        _should_send = got_done or got_segment_break or commentary_text is not None or _has_nl
                         if _should_send:
+                            if not got_done and not got_segment_break and commentary_text is None:
+                                # Send only complete lines (up to last \n)
+                                _nl_pos = self._accumulated.rfind("\n")
+                                _send_text = self._accumulated[:_nl_pos + 1] if _nl_pos >= 0 else self._accumulated
+                            else:
+                                _send_text = self._accumulated
+                            logger.warning(
+                                "[whale-nl] send: has_nl=%s got_done=%s segbreak=%s comm=%s text_len=%d",
+                                _has_nl, got_done, got_segment_break,
+                                commentary_text is not None, len(_send_text),
+                            )
+                            _sent_len = len(_send_text)
                             current_update_visible = await self._send_or_edit(
-                                self._accumulated,
+                                _send_text,
                                 finalize=(got_done or got_segment_break),
                                 is_turn_final=got_done,
                             )
-                            if not got_done and not got_segment_break and commentary_text is None:
-                                self._accumulated = ""
+                            # Remove sent partial from accumulated text
+                            if _sent_len and not got_done and not got_segment_break:
+                                self._accumulated = self._accumulated[_sent_len:]
+                        else:
+                            logger.warning(
+                                "[whale-nl] skip: text_len=%d (no newline yet)",
+                                len(self._accumulated),
+                            )
+                            current_update_visible = False
                     self._last_edit_time = time.monotonic()
 
                 if got_done:
