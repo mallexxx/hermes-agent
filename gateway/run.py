@@ -17212,6 +17212,11 @@ class GatewayRunner:
                 _raw_progress_limit - (64 if _raw_progress_limit > 128 else 0),
             )
 
+            # Webhook: force can_edit=False so tool progress goes via send(),
+            # not edit_message — webhook adapter doesn't support editing.
+            if source.platform == Platform.WEBHOOK:
+                can_edit = False
+
             # Detect whether the adapter's edit_message accepts metadata so
             # overflow edits preserve Telegram topic/thread routing (#27487).
             _edit_accepts_metadata = False
