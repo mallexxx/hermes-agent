@@ -16993,15 +16993,12 @@ class GatewayRunner:
         # Natural assistant status messages are intentionally independent from
         # tool progress and token streaming. Users can keep tool_progress quiet
         # in chat platforms while opting into concise mid-turn updates.
-        interim_assistant_messages_enabled = (
-            source.platform != Platform.WEBHOOK
-            and bool(
-                resolve_display_setting(
-                    user_config,
-                    platform_key,
-                    "interim_assistant_messages",
-                    True,
-                )
+        interim_assistant_messages_enabled = bool(
+            resolve_display_setting(
+                user_config,
+                platform_key,
+                "interim_assistant_messages",
+                True,
             )
         )
         

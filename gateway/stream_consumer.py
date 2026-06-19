@@ -579,6 +579,12 @@ class GatewayStreamConsumer:
                             or (elapsed >= self._current_edit_interval and _has_nl)
                         )
                         _should_send = _has_nl and _can_send
+                        if commentary_text is not None:
+                            # Commentary text is a complete interim message
+                            # from the agent between tool calls.  Send it
+                            # regardless of whether it contains \n.
+                            _should_send = True
+                            _send_text = commentary_text
                         if _should_send:
                             if not got_done and not got_segment_break and commentary_text is None:
                                 # Send only complete lines (up to last \\n)
