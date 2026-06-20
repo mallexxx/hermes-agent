@@ -549,10 +549,10 @@ class GatewayStreamConsumer:
                         self._last_sent_text = ""
 
                     if self.cfg.adapter_supports_edit:
-                        logger.warning(
-                            "[whale-nl] send: adapter_supports_edit=%s",
-                            self.cfg.adapter_supports_edit,
-                        )
+                        # logger.warning(
+                        #     "[whale-nl] send: adapter_supports_edit=%s",
+                            # self.cfg.adapter_supports_edit,
+                        # )
 
                         # Editing supported: use cursor for in-flight indicators
                         display_text = self._accumulated
