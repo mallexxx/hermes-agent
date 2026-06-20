@@ -571,14 +571,14 @@ class GatewayStreamConsumer:
                         # with \\n, or when the generation ends (got_done).
                         # Rate-limit intermediate partials by edit_interval to
                         # avoid flooding the platform with rapid sends.
-                        _has_nl = "\\n" in self._accumulated
+                        _has_nl = "\n" in self._accumulated
                         _can_send = (
                             got_done
                             or got_segment_break
                             or commentary_text is not None
                             or (elapsed >= self._current_edit_interval and _has_nl)
                         )
-                        _should_send = _has_nl and _can_send
+                        _should_send = _can_send
                         if commentary_text is not None:
                             # Commentary text is a complete interim message
                             # from the agent between tool calls.  Send it
@@ -588,7 +588,7 @@ class GatewayStreamConsumer:
                         if _should_send:
                             if not got_done and not got_segment_break and commentary_text is None:
                                 # Send only complete lines (up to last \\n)
-                                _nl_pos = self._accumulated.rfind("\\n")
+                                _nl_pos = self._accumulated.rfind("\n")
                                 _send_text = self._accumulated[:_nl_pos + 1] if _nl_pos >= 0 else self._accumulated
                             else:
                                 _send_text = self._accumulated
