@@ -16731,7 +16731,7 @@ class GatewayRunner:
                         else 0.0
                     )
                     # logger.warning("[whale-cfg2] platform_key=%s _adapter_supports_edit=%s",
-                                   platform_key, _adapter_supports_edit)
+                    #                platform_key, _adapter_supports_edit)
                     _consumer_cfg = StreamConsumerConfig(
                         edit_interval=_scfg.edit_interval,
                         buffer_threshold=_scfg.buffer_threshold,
@@ -17710,7 +17710,7 @@ class GatewayRunner:
                             else 0.0
                         )
                         # logger.warning("[whale-cfg] platform_key=%s _adapter_supports_edit=%s",
-                                       platform_key, _adapter_supports_edit)
+                        #                platform_key, _adapter_supports_edit)
                         _consumer_cfg = StreamConsumerConfig(
                             edit_interval=_scfg.edit_interval,
                             buffer_threshold=_scfg.buffer_threshold,
