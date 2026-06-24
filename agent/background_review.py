@@ -456,26 +456,32 @@ def _run_review_in_thread(
                 clear_thread_tool_whitelist,
             )
 
+            _allowed_sets = getattr(agent, "_review_allowed_toolsets", ["memory", "skills"])
             review_whitelist = {
                 t["function"]["name"]
                 for t in get_tool_definitions(
-                    enabled_toolsets=["memory", "skills"],
+                    enabled_toolsets=_allowed_sets,
                     quiet_mode=True,
                 )
             }
+            _allowed_names = ", ".join(_allowed_sets)
             set_thread_tool_whitelist(
                 review_whitelist,
                 deny_msg_fmt=(
                     "Background review denied non-whitelisted tool: "
-                    "{tool_name}. Only memory/skill tools are allowed."
+                    "{tool_name}. Only "
+                    + _allowed_names
+                    + " tools are allowed."
                 ),
             )
             try:
                 review_agent.run_conversation(
                     user_message=(
                         prompt
-                        + "\n\nYou can only call memory and skill "
-                        "management tools. Other tools will be denied "
+                        + "\n\nYou can only call the following tool "
+                        "categories: "
+                        + _allowed_names
+                        + ". Other tools will be denied "
                         "at runtime — do not attempt them."
                     ),
                     conversation_history=messages_snapshot,

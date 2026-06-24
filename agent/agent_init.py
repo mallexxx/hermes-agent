@@ -1191,6 +1191,49 @@ def init_agent(
     except Exception:
         pass
 
+    # ---
+    # Review config: custom prompt paths and allowed toolsets for the
+    # background memory/skill review (agent/background_review.py).
+    # Each prompt_path points to an .md file whose content replaces the
+    # corresponding hardcoded prompt constant.  Missing/unreadable paths
+    # are silently ignored (fall back to the built-in prompt).
+    # ---
+    agent._review_allowed_toolsets = ["memory", "skills"]
+    agent._MEMORY_REVIEW_PROMPT = None
+    agent._SKILL_REVIEW_PROMPT = None
+    agent._COMBINED_REVIEW_PROMPT = None
+    try:
+        review_cfg = _agent_cfg.get("review", {})
+        if isinstance(review_cfg, dict):
+            # Allowed toolsets for the review fork's whitelist
+            _ats = review_cfg.get("allowed_toolsets")
+            if _ats is not None and isinstance(_ats, list):
+                agent._review_allowed_toolsets = [str(t) for t in _ats]
+            # Read custom prompts from .md files
+            for _attr, _key in [
+                ("_MEMORY_REVIEW_PROMPT", "memory_prompt_path"),
+                ("_SKILL_REVIEW_PROMPT", "skill_prompt_path"),
+                ("_COMBINED_REVIEW_PROMPT", "combined_prompt_path"),
+            ]:
+                _path = review_cfg.get(_key)
+                if _path and isinstance(_path, str):
+                    _expanded = os.path.expanduser(_path)
+                    try:
+                        with open(_expanded, "r", encoding="utf-8") as _fh:
+                            setattr(agent, _attr, _fh.read())
+                            logger.info(
+                                "Background review: loaded custom prompt %s from %s",
+                                _attr, _expanded,
+                            )
+                    except (FileNotFoundError, PermissionError, OSError) as _io_err:
+                        logger.info(
+                            "Background review: custom prompt %s at %s not loaded "
+                            "(%s), using built-in",
+                            _attr, _expanded, _io_err,
+                        )
+    except Exception:
+        pass
+
     # Tool-use enforcement config: "auto" (default — matches hardcoded
     # model list), true (always), false (never), or list of substrings.
     _agent_section = _agent_cfg.get("agent", {})
