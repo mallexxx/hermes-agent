@@ -304,12 +304,33 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         if agent._memory_enabled:
             mem_block = agent._memory_store.format_for_system_prompt("memory")
             if mem_block:
+                # Inject thread-key context into the memory block header
+                _tk = getattr(agent, "_gateway_session_key", None)
+                if _tk and hasattr(agent, "_memory_thread_scoped") and agent._memory_thread_scoped:
+                    mem_block = mem_block.replace(
+                        "MEMORY (your personal notes)",
+                        f"MEMORY for thread: {_tk}",
+                    )
                 volatile_parts.append(mem_block)
         # USER.md is always included when enabled.
         if agent._user_profile_enabled:
             user_block = agent._memory_store.format_for_system_prompt("user")
             if user_block:
                 volatile_parts.append(user_block)
+
+    # Custom memory instruction — replaces the built-in tool schema guidance
+    # in the system prompt.  Describes what the agent should remember, what
+    # to document, how to use the memory tool, etc.
+    _mem_instr = getattr(agent, "_memory_instruction", None)
+    if _mem_instr and agent._memory_enabled:
+        _tk = getattr(agent, "_gateway_session_key", None)
+        _ctx = f" for thread: {_tk}" if _tk else ""
+        volatile_parts.append(
+            f"══════════════════════════════════════════════\n"
+            f"MEMORY INSTRUCTION{_ctx}\n"
+            f"══════════════════════════════════════════════\n"
+            f"{_mem_instr}"
+        )
 
     # External memory provider system prompt block (additive to built-in)
     if agent._memory_manager:

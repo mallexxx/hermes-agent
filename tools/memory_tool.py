@@ -119,18 +119,28 @@ class MemoryStore:
         Never mutated mid-session. Keeps prefix cache stable.
       - memory_entries / user_entries: live state, mutated by tool calls, persisted to disk.
         Tool responses always reflect this live state.
+
+    MEMORY.md is thread-scoped when a thread_key is provided — each unique
+    chat/thread gets its own MEMORY.md in ``memories/threads/<key>/MEMORY.md``.
+    USER.md is always global — the user profile does not depend on the thread.
     """
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
+    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375,
+                 thread_key: Optional[str] = None):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        self.thread_key = thread_key
         # Frozen snapshot for system prompt -- set once at load_from_disk()
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
 
     def load_from_disk(self):
         """Load entries from MEMORY.md and USER.md, capture system prompt snapshot.
+
+        MEMORY.md is loaded from ``memories/threads/<thread_key>/MEMORY.md``
+        when ``self.thread_key`` is set, otherwise from ``memories/MEMORY.md``.
+        USER.md is always loaded from ``memories/USER.md`` (global).
 
         The frozen snapshot is what enters the system prompt. We scan each
         entry for injection/promptware patterns at snapshot-build time —
@@ -150,8 +160,8 @@ class MemoryStore:
         mem_dir = get_memory_dir()
         mem_dir.mkdir(parents=True, exist_ok=True)
 
-        self.memory_entries = self._read_file(mem_dir / "MEMORY.md")
-        self.user_entries = self._read_file(mem_dir / "USER.md")
+        self.memory_entries = self._read_file(self._path_for("memory"))
+        self.user_entries = self._read_file(self._path_for("user"))
 
         # Deduplicate entries (preserves order, keeps first occurrence)
         self.memory_entries = list(dict.fromkeys(self.memory_entries))
@@ -242,11 +252,12 @@ class MemoryStore:
                     pass
             fd.close()
 
-    @staticmethod
-    def _path_for(target: str) -> Path:
+    def _path_for(self, target: str) -> Path:
         mem_dir = get_memory_dir()
         if target == "user":
             return mem_dir / "USER.md"
+        if self.thread_key:
+            return mem_dir / "threads" / self.thread_key / "MEMORY.md"
         return mem_dir / "MEMORY.md"
 
     def _reload_target(self, target: str) -> Optional[str]:

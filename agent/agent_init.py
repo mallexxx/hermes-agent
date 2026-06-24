@@ -1073,13 +1073,36 @@ def init_agent(
             agent._memory_enabled = mem_config.get("memory_enabled", False)
             agent._user_profile_enabled = mem_config.get("user_profile_enabled", False)
             agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
+            agent._memory_thread_scoped = bool(mem_config.get("thread_scoped", False))
+            agent._memory_instruction = None
             if agent._memory_enabled or agent._user_profile_enabled:
                 from tools.memory_tool import MemoryStore
+                # Resolve thread_key: use agent's session_key if thread_scoped
+                _thread_key = None
+                if agent._memory_thread_scoped:
+                    _thread_key = getattr(agent, "_gateway_session_key", None)
                 agent._memory_store = MemoryStore(
                     memory_char_limit=mem_config.get("memory_char_limit", 2200),
                     user_char_limit=mem_config.get("user_char_limit", 1375),
+                    thread_key=_thread_key,
                 )
                 agent._memory_store.load_from_disk()
+            # Load custom memory instruction from .md file
+            _mem_prompt_path = mem_config.get("prompt_path") if mem_config else None
+            if _mem_prompt_path and isinstance(_mem_prompt_path, str):
+                _expanded = os.path.expanduser(_mem_prompt_path)
+                try:
+                    with open(_expanded, "r", encoding="utf-8") as _fh:
+                        agent._memory_instruction = _fh.read()
+                        logger.info(
+                            "Loaded custom memory instruction from %s",
+                            _expanded,
+                        )
+                except (FileNotFoundError, PermissionError, OSError) as _io_err:
+                    logger.info(
+                        "Custom memory instruction at %s not loaded (%s), using built-in",
+                        _expanded, _io_err,
+                    )
         except Exception:
             pass  # Memory is optional -- don't break agent init
     
