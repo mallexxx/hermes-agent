@@ -24,6 +24,9 @@ Pure helpers that read the agent's state.  AIAgent keeps thin forwarders.
 from __future__ import annotations
 
 import json
+import logging
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import (
@@ -41,6 +44,31 @@ from agent.prompt_builder import (
     TOOL_USE_ENFORCEMENT_MODELS,
 )
 from agent.runtime_cwd import resolve_context_cwd
+
+logger = logging.getLogger(__name__)
+
+
+def _load_prompt_block(agent, block_name: str, default: str) -> str:
+    """Load a prompt block from a file if configured, else return default.
+
+    Reads ``agent._prompt_overrides[block_name]`` (set from config.yaml
+    ``agent.prompt_overrides`` at init time).  Falls back to *default* when
+    the override path is missing, unreadable, or empty.
+    """
+    overrides = getattr(agent, "_prompt_overrides", None) or {}
+    path = overrides.get(block_name)
+    if path:
+        try:
+            resolved = os.path.expanduser(path)
+            content = Path(resolved).read_text(encoding="utf-8").strip()
+            if content:
+                return content
+        except Exception:
+            logger.debug(
+                "Could not load prompt override '%s' from %s",
+                block_name, path,
+            )
+    return default
 
 
 def _ra():
@@ -99,7 +127,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
 
     # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
-    stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+    stable_parts.append(_load_prompt_block(agent, "hermes_help", HERMES_AGENT_HELP_GUIDANCE))
 
     # Universal task-completion / no-fabrication guidance.  Applied to ALL
     # models regardless of tool_use_enforcement gating — the failure modes
@@ -108,16 +136,16 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # config.yaml ``agent.task_completion_guidance`` (default True) so
     # users who want a leaner prompt can turn it off.
     if getattr(agent, "_task_completion_guidance", True) and agent.valid_tool_names:
-        stable_parts.append(TASK_COMPLETION_GUIDANCE)
+        stable_parts.append(_load_prompt_block(agent, "task_completion", TASK_COMPLETION_GUIDANCE))
 
     # Tool-aware behavioral guidance: only inject when the tools are loaded
     tool_guidance = []
     if "memory" in agent.valid_tool_names:
-        tool_guidance.append(MEMORY_GUIDANCE)
+        tool_guidance.append(_load_prompt_block(agent, "memory_guidance", MEMORY_GUIDANCE))
     if "session_search" in agent.valid_tool_names:
-        tool_guidance.append(SESSION_SEARCH_GUIDANCE)
+        tool_guidance.append(_load_prompt_block(agent, "session_search_guidance", SESSION_SEARCH_GUIDANCE))
     if "skill_manage" in agent.valid_tool_names:
-        tool_guidance.append(SKILLS_GUIDANCE)
+        tool_guidance.append(_load_prompt_block(agent, "skills_guidance", SKILLS_GUIDANCE))
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
     # HERMES_KANBAN_TASK env var). Normal chat sessions never see
@@ -162,7 +190,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             model_lower = (agent.model or "").lower()
             _inject = any(p in model_lower for p in TOOL_USE_ENFORCEMENT_MODELS)
         if _inject:
-            stable_parts.append(TOOL_USE_ENFORCEMENT_GUIDANCE)
+            stable_parts.append(_load_prompt_block(agent, "tool_use_enforcement", TOOL_USE_ENFORCEMENT_GUIDANCE))
             _model_lower = (agent.model or "").lower()
             # Google model operational guidance (conciseness, absolute
             # paths, parallel tool calls, verify-before-edit, etc.)
@@ -174,7 +202,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             # without tool calls, suggests workarounds instead of using
             # existing tools, replies with plans instead of executing).
             if "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower:
-                stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+                stable_parts.append(_load_prompt_block(agent, "execution_discipline", OPENAI_MODEL_EXECUTION_GUIDANCE))
 
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
     if has_skills_tools:

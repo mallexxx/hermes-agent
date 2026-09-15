@@ -1055,6 +1055,17 @@ def init_agent(
         )
     except Exception as _tlg_err:
         _ra().logger.warning("Tool loop guardrail config ignored: %s", _tlg_err)
+    # Load prompt_overrides from config — file paths that replace hardcoded
+    # stable blocks in the system prompt.  Each key is a block name,
+    # each value is a path to a .md file.  Falls back to hardcoded defaults
+    # when a file is missing or unreadable.
+    agent._prompt_overrides = {}
+    try:
+        _po = _agent_cfg.get("agent", {}).get("prompt_overrides", {})
+        if isinstance(_po, dict):
+            agent._prompt_overrides = _po
+    except Exception:
+        pass
     # Cache only the derived auxiliary compression context override that is
     # needed later by the startup feasibility check.  Avoid exposing a
     # broad pseudo-public config object on the agent instance.
