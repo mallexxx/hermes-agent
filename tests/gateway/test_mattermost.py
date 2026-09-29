@@ -416,13 +416,15 @@ class TestMattermostMentionBehavior:
         self.adapter._bot_username = "hermes-bot"
         self.adapter.handle_message = AsyncMock()
 
-    def _make_event(self, message, channel_type="O", channel_id="chan_456"):
+    def _make_event(self, message, channel_type="O", channel_id="chan_456", root_id=None):
         post_data = {
             "id": "post_mention",
             "user_id": "user_123",
             "channel_id": channel_id,
             "message": message,
         }
+        if root_id:
+            post_data["root_id"] = root_id
         return {
             "event": "posted",
             "data": {
@@ -479,6 +481,41 @@ class TestMattermostMentionBehavior:
             os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
             await self.adapter._handle_ws_event(
                 self._make_event("@hermes-bot what is 2+2")
+            )
+            assert self.adapter.handle_message.called
+            msg = self.adapter.handle_message.call_args[0][0]
+            assert "@hermes-bot" not in msg.text
+            assert "2+2" in msg.text
+
+    @pytest.mark.asyncio
+    async def test_thread_reply_without_mention_responds(self):
+        """Post inside a thread (root_id set) bypasses the @mention gate."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            os.environ.pop("MATTERMOST_FREE_RESPONSE_CHANNELS", None)
+            await self.adapter._handle_ws_event(
+                self._make_event("thanks, continue", root_id="root_post_1")
+            )
+            assert self.adapter.handle_message.called
+            msg = self.adapter.handle_message.call_args[0][0]
+            assert msg.text == "thanks, continue"
+
+    @pytest.mark.asyncio
+    async def test_channel_root_without_mention_still_skipped(self):
+        """A channel-root post (no root_id) still requires @mention."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            os.environ.pop("MATTERMOST_FREE_RESPONSE_CHANNELS", None)
+            await self.adapter._handle_ws_event(self._make_event("hello"))
+            assert not self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_thread_reply_with_mention_strips_mention(self):
+        """In-thread @mention is still stripped from the text sent to the agent."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            await self.adapter._handle_ws_event(
+                self._make_event("@hermes-bot what is 2+2", root_id="root_post_1")
             )
             assert self.adapter.handle_message.called
             msg = self.adapter.handle_message.call_args[0][0]

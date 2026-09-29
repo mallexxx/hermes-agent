@@ -731,6 +731,12 @@ class MattermostAdapter(BasePlatformAdapter):
         #   require_mention / MATTERMOST_REQUIRE_MENTION: Require @mention in channels (default: true)
         #   free_response_channels / MATTERMOST_FREE_RESPONSE_CHANNELS: Channel IDs where bot responds without mention
         #   allowed_channels / MATTERMOST_ALLOWED_CHANNELS: If set, bot ONLY responds in these channels (whitelist)
+        # Thread replies bypass the @mention requirement: inside a thread the
+        # conversation is already addressed to the bot, so every follow-up post
+        # should reach the agent without an explicit mention.  Channel-root
+        # posts still require @mention.
+        is_thread_reply = bool(post.get("root_id"))
+
         if channel_type_raw != "D":
             # allowed_channels check (whitelist — must pass before other gating).
             # When set, messages from channels NOT in this list are silently
@@ -768,7 +774,12 @@ class MattermostAdapter(BasePlatformAdapter):
                 for pattern in mention_patterns
             )
 
-            if require_mention and not is_free_channel and not has_mention:
+            if (
+                require_mention
+                and not is_free_channel
+                and not has_mention
+                and not is_thread_reply
+            ):
                 logger.debug(
                     "Mattermost: skipping non-DM message without @mention (channel=%s)",
                     channel_id,
